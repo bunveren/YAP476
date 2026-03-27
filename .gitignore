@@ -1,5 +1,5 @@
 # Custom ignores
-notes.ipynb
+notes*
 *.csv
 
 # Byte-compiled / optimized / DLL files
