@@ -1,5 +1,4 @@
 # Custom ignores
-notes*
 *.csv
 
 # Byte-compiled / optimized / DLL files
