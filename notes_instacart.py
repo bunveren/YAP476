@@ -13,6 +13,9 @@ from mlxtend.frequent_patterns import apriori, fpgrowth, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 import networkx as nx
 from IPython.display import display
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore', category=UserWarning, module='mlxtend')
 
 plt.style.use('seaborn-v0_8-muted')
 sns.set_theme(style="whitegrid")
@@ -82,7 +85,7 @@ sns.histplot(
 plt.xlabel('Number of Items')
 plt.ylabel('Number of Orders')
 plt.xlim(0, 57)
-plt.show()
+#plt.show()
 
 plt.figure(figsize=(15, 5))
 plt.subplot(1, 3, 1)
@@ -92,35 +95,30 @@ df_merged['aisle'].value_counts()[:10].plot(kind='bar', title='Top 10 Aisles')
 plt.subplot(1, 3, 3)
 df_merged['department'].value_counts()[:10].plot(kind='bar', title='Top 10 Departments')
 plt.tight_layout()
-plt.show()
+#plt.show()
 
 
 
 
 ### Transaction Encoding
 def get_basket(df, level_column, is_sparse=True):
-    baskets = df.groupby('order_id')[level_column].apply(list).reset_index()
-    meta = df.groupby('order_id').agg({
-        'hour_bin': 'first',
-        'day_type': 'first',
-        'basket_size': 'first'
-    }).reset_index()
+    df = df.dropna(subset=[level_column, 'hour_bin', 'day_type', 'basket_size'])
     
+    baskets = df.groupby('order_id')[level_column].unique().reset_index()
+    meta = df.drop_duplicates('order_id')[['order_id', 'hour_bin', 'day_type', 'basket_size']]
     merged = baskets.merge(meta, on='order_id')
     
-    def combine_dims(row):
-        items = [str(i) for i in set(row[level_column])]
-        metadata = [str(row['hour_bin']), str(row['day_type']), str(row['basket_size'])]
-        return items + metadata
+    items_list = merged[level_column].tolist()
+    meta_cols = ['hour_bin', 'day_type', 'basket_size']
+    meta_list = merged[meta_cols].fillna('Unknown').astype(str).values.tolist()
     
-    transaction_list = merged.apply(combine_dims, axis=1).tolist()
-    
+    transaction_list = [list(items) + meta for items, meta in zip(items_list, meta_list)]
     te = TransactionEncoder()
     te_ary = te.fit(transaction_list).transform(transaction_list, sparse=is_sparse)
     
-    if is_sparse: return pd.DataFrame.sparse.from_spmatrix(te_ary, columns=te.columns_)
+    if is_sparse: 
+        return pd.DataFrame.sparse.from_spmatrix(te_ary, columns=te.columns_)
     return pd.DataFrame(te_ary, columns=te.columns_)
-
 
 
 
@@ -128,7 +126,11 @@ def get_basket(df, level_column, is_sparse=True):
 def run_mining_experiment(dimensions=['Weekend', 'Weekday'], levels=['department', 'aisle', 'product_name'], supports=[0.05, 0.02, 0.01]):
     results = []
     all_rules = {}
-    
+    level_supports = { # TODO CHANGE ACC TO METHOD PARAMS
+        'department': [0.2, 0.1],
+        'aisle': [0.05, 0.02],
+        'product_name': [0.01, 0.005]
+    }
     for dim in dimensions:
         print(f"\n=== Processing Dimension: {dim} ===")
         df_subset = df_merged[df_merged['day_type'] == dim]
@@ -137,47 +139,67 @@ def run_mining_experiment(dimensions=['Weekend', 'Weekday'], levels=['department
             print(f"--- Mining Level: {level} ---")
             basket_df = get_basket(df_subset, level)
             mem_usage = basket_df.memory_usage(deep=True).sum() / 1024**2
-            
-            for min_sup in supports:
+            current_supports = level_supports.get(level, [0.05])
+            for min_sup in current_supports:
                 try:
                     start_time = time.time()
                     freq_items = fpgrowth(basket_df, min_support=min_sup, use_colnames=True)
                     exec_time = time.time() - start_time
                     
                     rules = association_rules(freq_items, metric="lift", min_threshold=1.0)
-                    
                     if not rules.empty:
                         rules['kulczynski'] = (rules['support']/rules['antecedent support'] + rules['support']/rules['consequent support']) / 2
                         rules['ir'] = np.abs(rules['antecedent support'] - rules['consequent support']) / (rules['antecedent support'] + rules['consequent support'] - rules['support'])
-                        robust_count = len(rules[(rules['kulczynski'] > 0.5) & (rules['ir'] < 0.3)])
-                    else: robust_count = 0
+                        robust_count = len(rules[(rules['kulczynski'] > 0.4) & (rules['ir'] < 0.6)])
+                    else:
+                        robust_count = 0
+                        
                     all_rules[(dim, level, min_sup)] = rules
                     results.append({
                         'Dimension': dim, 'Level': level, 'Support': min_sup, 
                         'Algorithm': 'fpgrowth', 'Time': exec_time, 
                         'Memory_MB': mem_usage, 'Robust_Rules': robust_count
                     })
-                except Exception as e: print(f"Error at {dim}-{level}-{min_sup}: {e}")
+                    print(f"  Sup: {min_sup} | Rules Found: {len(rules)} | Time: {exec_time:.2f}s")
+                except Exception as e:
+                    print(f"  Error at {dim}-{level}-{min_sup}: {e}")
                 
     return pd.DataFrame(results), all_rules
 benchmark_df, all_rules = run_mining_experiment()
 
+ 
+plt.figure(figsize=(10, 6))
+sns.barplot(data=benchmark_df, x='Support', y='Time', hue='Dimension')
+plt.title('Execution Time: Apriori vs FP-Growth')
+plt.yscale('log')
+#plt.show()
+
+plt.figure(figsize=(10, 6))
+sns.barplot(data=benchmark_df, x='Level', y='Memory_MB', hue='Algorithm')
+plt.title('Memory Usage by Level')
+plt.ylabel('Memory (MB)')
+#plt.show()
+
+plt.figure(figsize=(12, 6))
+sns.barplot(data=benchmark_df, x='Support', y='Time', hue='Algorithm')
+plt.title('Execution Time Comparison: Apriori vs FP-Growth')
+plt.xlabel('Minimum Support Level')
+plt.ylabel('Execution Time (seconds)')
+plt.yscale('log')
+#plt.show()
 
 
 
 ### Redundancy Filtering Across Concept Hierarchies
 def filter_hierarchical_redundancy(low_rules, high_rules_set, mapping_dict):
-    def is_redundant(row):
-        try:
-            ant_high = tuple(sorted(list(set(mapping_dict[item] for item in row['antecedents']))))
-            cons_high = tuple(sorted(list(set(mapping_dict[item] for item in row['consequents']))))
-            return (ant_high, cons_high) in high_rules_set
-        except KeyError: return False
-    if low_rules.empty: return low_rules
-    
-    low_rules = low_rules.copy()
-    low_rules['is_redundant'] = low_rules.apply(is_redundant, axis=1)
-    return low_rules[low_rules['is_redundant'] == False].drop(columns=['is_redundant'])
+    if low_rules.empty or not high_rules_set: return low_rules
+    def check_redundancy(row):
+        ant_high = tuple(sorted(set(mapping_dict.get(item, item) for item in row['antecedents'])))
+        cons_high = tuple(sorted(set(mapping_dict.get(item, item) for item in row['consequents'])))
+        return (ant_high, cons_high) in high_rules_set
+    mask = low_rules.apply(check_redundancy, axis=1)
+    return low_rules[~mask]
+
 def plot_rules_network(rules_df, title="Association Rules Network", num_rules=30):
     if rules_df.empty:
         print(f"No rules to plot for: {title}")
@@ -204,55 +226,33 @@ def plot_rules_network(rules_df, title="Association Rules Network", num_rules=30
     plt.title(f"{title}\n(Edge thickness = Lift, Nodes = Items)", fontsize=15)
     plt.axis('off')
     plt.tight_layout()
-    plt.show()
+    #plt.show()
     
 
-
-## 
-plt.figure(figsize=(10, 6))
-sns.barplot(data=benchmark_df, x='Support', y='Time', hue='Dimension')
-plt.title('Execution Time: Apriori vs FP-Growth')
-plt.yscale('log')
-plt.show()
-
-plt.figure(figsize=(10, 6))
-sns.barplot(data=benchmark_df, x='Level', y='Memory_MB', hue='Algorithm')
-plt.title('Memory Usage by Level')
-plt.ylabel('Memory (MB)')
-plt.show()
-
-plt.figure(figsize=(12, 6))
-sns.barplot(data=benchmark_df, x='Support', y='Time', hue='Algorithm')
-plt.title('Execution Time Comparison: Apriori vs FP-Growth')
-plt.xlabel('Minimum Support Level')
-plt.ylabel('Execution Time (seconds)')
-plt.yscale('log')
-plt.show()
 
 
 
 ##
 def display_robust_rules(rules_df, level_name, top_n=20):
     print(f"\n--- Top {top_n} Robust Rules for {level_name} (Filtered by Kulc & IR) ---")
-    robust = rules_df[(rules_df['kulczynski'] > 0.5) & (rules_df['ir'] < 0.3)]
+    temp_df = rules_df.copy()
+    temp_df['antecedents'] = temp_df['antecedents'].apply(lambda x: ', '.join(list(x)))
+    temp_df['consequents'] = temp_df['consequents'].apply(lambda x: ', '.join(list(x)))
     display_cols = ['antecedents', 'consequents', 'support', 'confidence', 'lift', 'kulczynski', 'ir']
-    top_robust = robust.sort_values('kulczynski', ascending=False).head(top_n)
-    display(top_robust[display_cols])
-display_robust_rules(all_rules[('Weekend', 'product_name', 0.01)], "Product Level")    
+    top_robust = temp_df.sort_values('kulczynski', ascending=False).head(top_n)
+    display(top_robust[display_cols]) 
+
+
+def get_contextual_rules(rules_df, context_items=['Weekend', 'Hour_Afternoon']):
+    filtered = rules_df[rules_df['antecedents'].apply(lambda x: any(item in x for item in context_items))]
+    return filtered.sort_values('lift', ascending=False)
+afternoon_rules = get_contextual_rules(all_rules[('Weekend', 'product_name', 0.01)], ['Hour_Afternoon'])
+display(afternoon_rules.head(10))
 
 
 
-## 
-sample_key = ('Weekend', 'product_name', 0.01)
-if sample_key in all_rules:
-    df_rules = all_rules[sample_key]
-    robust_top = df_rules[(df_rules['kulczynski'] > 0.5) & (df_rules['ir'] < 0.3)].sort_values('kulczynski', ascending=False).head(10)
-    print("\n--- TOP 10 ROBUST PRODUCT RULES ---")
-    display(robust_top[['antecedents', 'consequents', 'support', 'lift', 'kulczynski', 'ir']])
-
-
-
-## 
+## rule network & redundancy filtering
+##TODO Lift ve Kulczynski ye gore bir Scatter Plot 
 mapping_data = df_merged[['product_name', 'aisle', 'department']].drop_duplicates()
 prod_to_aisle_map = mapping_data.set_index('product_name')['aisle'].to_dict()
 aisle_to_dept_map = mapping_data[['aisle', 'department']].drop_duplicates().set_index('aisle')['department'].to_dict()
@@ -286,6 +286,81 @@ for d_type in day_types:
             filtered_results[(d_type, sup, 'prod_vs_aisle')] = interesting_prod
         else: filtered_results[(d_type, sup, 'prod_vs_aisle')] = rules_prod
         
+        
+        
+def summarize_context_impact(all_rules_dict):
+    summary_data = []
+    for key, df in all_rules_dict.items():
+        if df.empty: continue
+        dim, level, sup = key
+        context_tags = ['Weekend', 'Weekday', 'Hour_', 'Basket']
+        
+        for tag in context_tags:
+            mask = df['antecedents'].apply(lambda x: any(tag in str(item) for item in x))
+            avg_lift = df[mask]['lift'].mean()
+            rule_count = mask.sum()
+            
+            summary_data.append({
+                'Dimension_Group': tag,
+                'Level': level,
+                'Min_Support': sup,
+                'Avg_Lift': avg_lift,
+                'Rule_Count': rule_count
+            })
+            
+    return pd.DataFrame(summary_data).dropna()
+context_summary = summarize_context_impact(all_rules)
+display(context_summary.sort_values('Avg_Lift', ascending=False))
+
+
+def clean_rules_df(df):
+    if df.empty: return df
+    df_clean = df.copy()
+    df_clean['antecedents'] = df_clean['antecedents'].apply(lambda x: ', '.join(list(x)))
+    df_clean['consequents'] = df_clean['consequents'].apply(lambda x: ', '.join(list(x)))
+    return df_clean
+
+##TODO Department,Aisle için Kulc > 0.5 IR < 0.5 /// Product için Kulc > 0.3 IR < 0.7 lazım
+
+def plot_robustness_scatter(rules_df, title):
+    if rules_df.empty: return
+    
+    plt.figure(figsize=(10, 6))
+    scatter = plt.scatter(rules_df['kulczynski'], rules_df['ir'], 
+                         c=rules_df['lift'], cmap='YlOrRd', 
+                         s=rules_df['support']*10000, alpha=0.6, edgecolors='w')
+    
+    plt.colorbar(scatter, label='Lift')
+    plt.axvline(0.5, color='green', linestyle='--', alpha=0.4, label='High Certainty')
+    plt.axhline(0.5, color='blue', linestyle='--', alpha=0.4, label='Low Imbalance')
+    
+    plt.xlabel('Kulczynski Measure (Certainty)')
+    plt.ylabel('Imbalance Ratio (IR)')
+    plt.title(f"Robustness Analysis: {title}")
+    plt.legend()
+    plt.show()
+
+def run_full_batch_analysis(rules_dict):
+    print("\n" + "="*50)
+    print("="*50)
+    
+    for (dim, level, sup), rules in rules_dict.items():
+        if rules.empty: continue
+        title_str = f"{dim} | {level} | Sup: {sup}"
+        plot_robustness_scatter(rules, title_str)
+        golden_rules = rules[(rules['kulczynski'] > 0.5) & (rules['ir'] < 0.5)]
+        
+        print(f"\n>>> kowalski: {title_str}")
+        print(f"- total rule count: {len(rules)}")
+        print(f"- golden rule count: {len(golden_rules)}")
+        
+        if not golden_rules.empty:
+            print("- hottest rules acc to lift:")
+            top_3 = clean_rules_df(golden_rules.sort_values('lift', ascending=False).head(3))
+            print(top_3[['antecedents', 'consequents', 'lift', 'kulczynski', 'ir']].to_string(index=False))
+        print("-" * 30)
+run_full_batch_analysis(all_rules)
+
 
 scenarios = [
     ('Weekend', 0.01, 'prod_vs_aisle', 'Product Rules (Filtered by Aisle)'),
@@ -297,8 +372,7 @@ for dim, sup, r_type, title_suffix in scenarios:
     key = (dim, sup, r_type)
     if key in filtered_results:
         rules_to_plot = filtered_results[key]
-        robust_rules = rules_to_plot[(rules_to_plot['kulczynski'] > 0.4) & (rules_to_plot['ir'] < 0.4)]
-        full_title = f"{dim} - {title_suffix} (Sup: {sup})"
-        plot_rules_network(robust_rules, title=full_title, num_rules=20)
-        
-##
+        if not rules_to_plot.empty:
+            robust_rules = rules_to_plot.sort_values('kulczynski', ascending=False).head(50)
+            full_title = f"{dim} - {title_suffix} (Sup: {sup})"
+            plot_rules_network(robust_rules, title=full_title, num_rules=50)
