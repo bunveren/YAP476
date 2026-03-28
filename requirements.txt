@@ -1,0 +1,8 @@
+# python==3.11.9
+pandas==3.0.1
+numpy>=2.3.5
+matplotlib==3.10.8
+seaborn==0.13.2
+networkx==3.4.2
+mlxtend==0.24.0
+ipython==9.3.0
